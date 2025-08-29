@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Calculator Vault</title>
+<style>
+  :root {
+    font-family: system-ui, Arial, sans-serif;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: #e8ad24;
+    margin: 0;
+    padding: 20px;
+  }
+  .card {
+    width: 360px;
+    background: #7a611b;
+    border-radius: 20px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+    overflow: hidden;
+  }
+  .display {
+    padding: 20px;
+    background: #2d2d2d;
+    color: #fff;
+    font-size: 32px;
+    text-align: right;
+    border-top-left-radius: 20px;
+    border-top-right-radius: 20px;
+    min-height: 54px;
+  }
+  .pad {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+    padding: 18px;
+  }
+  button {
+    height: 70px;
+    width: 70px;
+    border-radius: 50%;
+    border: none;
+    font-size: 20px;
+    font-weight: bold;
+    cursor: pointer;
+    color: #2d2d2d;
+    background: #f0f0f0;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+    transition: all 0.2s;
+  }
+  button:hover {
+    background: #e0e0e0;
+    transform: scale(1.05);
+  }
+  button.op {
+    background: #d6e0f0;
+    color: #1d3557;
+  }
+  button.equal {
+    background: #457b9d;
+    color: #fff;
+    grid-column: span 2;
+    width: 100%;
+    border-radius: 40px;
+  }
+  #vault {
+    display: none;
+    padding: 15px;
+  }
+  .files {
+    max-height: 200px;
+    overflow: auto;
+    border: 1px dashed #ccc;
+    padding: 8px;
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: #fff;
+  }
+  .file-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px;
+    border-bottom: 1px solid #eee;
+  }
+  .file-item:last-child { border-bottom: none; }
+  .small-btn {
+    padding: 6px 10px;
+    font-size: 13px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    background: #ddd;
+  }
+  .danger {
+    background: #ef476f;
+    color: #fff;
+  }
+  .muted { font-size:12px;color:#666; }
+  .meta { font-size:11px;color:#444; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div id="display" class="display">0</div>
+    <div class="pad" id="pad">
+      <button data-key="7">7</button>
+      <button data-key="8">8</button>
+      <button data-key="9">9</button>
+      <button class="op" data-key="/">÷</button>
+
+      <button data-key="4">4</button>
+      <button data-key="5">5</button>
+      <button data-key="6">6</button>
+      <button class="op" data-key="*">×</button>
+
+      <button data-key="1">1</button>
+      <button data-key="2">2</button>
+      <button data-key="3">3</button>
+      <button class="op" data-key="-">−</button>
+
+      <button data-key="0">0</button>
+      <button data-key=".">.</button>
+      <button class="equal" id="equals">=</button>
+      <button class="op" data-key="+">+</button>
+
+      <button data-key="C">C</button>
+      <button data-key="DEL">DEL</button>
+    </div>
+
+    <!-- Vault UI (hidden) -->
+    <div id="vault">
+      <div style="font-size:12px;color:#555;margin-bottom:8px;">
+        Vault unlocked. Upload files to encrypt & store locally.
+      </div>
+      <input type="file" id="fileInput" multiple />
+      <div style="display:flex;gap:8px;margin-bottom:8px;">
+        <button id="uploadBtn" class="small-btn">Encrypt & Store</button>
+        <button id="changePinBtn" class="small-btn">Change PIN</button>
+        <button id="lockBtn" class="small-btn danger">Lock Vault</button>
+      </div>
+      <div class="files" id="filesList">No files yet.</div>
+      <div class="muted">Tip: Enter PIN then press '=' to open vault.</div>
+    </div>
+  </div>
+
+<script>
+/* ========== Utilities ========== */
+// Text <-> ArrayBuffer
+function str2ab(str){ return new TextEncoder().encode(str); }
+function ab2str(buf){ return new TextDecoder().decode(buf); }
+function bufToBase64(buf){
+  const bin = String.fromCharCode(...new Uint8Array(buf));
+  return btoa(bin);
+}
+function base64ToBuf(b64){
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr.buffer;
+}
+function randBytes(len){
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return arr;
+}
+
+/* ========== IndexedDB wrapper ========== */
+const DB_NAME = 'calculator-vault';
+const DB_VERSION = 1;
+const FILE_STORE = 'files';
+const META_STORE = 'meta';
+
+function openDB(){
+  return new Promise((res, rej)=>{
+    const r = indexedDB.open(DB_NAME, DB_VERSION);
+    r.onupgradeneeded = e=>{
+      const db = e.target.result;
+      if(!db.objectStoreNames.contains(FILE_STORE)){
+        db.createObjectStore(FILE_STORE, { keyPath: 'id' });
+      }
+      if(!db.objectStoreNames.contains(META_STORE)){
+        db.createObjectStore(META_STORE, { keyPath: 'k' });
+      }
+    };
+    r.onsuccess = ()=> res(r.result);
+    r.onerror = ()=> rej(r.error);
+  });
+}
+
+async function idbPut(store, val){
+  const db = await openDB();
+  return new Promise((res, rej)=>{
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(val);
+    tx.oncomplete = ()=> res();
+    tx.onerror = ()=> rej(tx.error);
+  });
+}
+async function idbGet(store, key){
+  const db = await openDB();
+  return new Promise((res, rej)=>{
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(key);
+    req.onsuccess = ()=> res(req.result);
+    req.onerror = ()=> rej(req.error);
+  });
+}
+async function idbDelete(store, key){
+  const db = await openDB();
+  return new Promise((res, rej)=>{
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).delete(key);
+    tx.oncomplete = ()=> res();
+    tx.onerror = ()=> rej(tx.error);
+  });
+}
+async function idbGetAll(store){
+  const db = await openDB();
+  return new Promise((res, rej)=>{
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).getAll();
+    req.onsuccess = ()=> res(req.result);
+    req.onerror = ()=> rej(req.error);
+  });
+}
+
+/* ========== Crypto: PBKDF2 -> AES-GCM key derivation ========== */
+const PBKDF_ITER = 150_000; // strong enough, adjust if needed
+
+async function deriveKeyFromPin(pin, saltUint8){
+  // pin: string, saltUint8: Uint8Array
+  const baseKey = await crypto.subtle.importKey(
+    'raw', str2ab(pin), {name:'PBKDF2'}, false, ['deriveKey']
+  );
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: saltUint8, iterations: PBKDF_ITER, hash: 'SHA-256' },
+    baseKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt','decrypt']
+  );
+  return key;
+}
+
+async function encryptWithKey(key, dataArrayBuffer){
+  const iv = randBytes(12);
+  const ct = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, dataArrayBuffer);
+  return { iv: bufToBase64(iv.buffer), ct: bufToBase64(ct) };
+}
+
+async function decryptWithKey(key, iv_b64, ct_b64){
+  const iv = new Uint8Array(base64ToBuf(iv_b64));
+  const ct = base64ToBuf(ct_b64);
+  const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, key, ct);
+  return plain;
+}
+
+/* ========== Vault metadata / initialization ========== */
+/*
+meta object stored in META_STORE under key 'vault':
+{
+  k: 'vault',
+  salt: <base64 of salt bytes>,     // used to derive key from PIN
+  check_iv: <base64 iv>,
+  check_ct: <base64 ciphertext>,    // encrypted check text "vault-ok"
+  createdAt: timestamp
+}
+*/
+async function getMeta(){ return await idbGet(META_STORE, 'vault'); }
+
+async function createNewVault(pin){
+  const salt = randBytes(16);
+  const key = await deriveKeyFromPin(pin, salt);
+  // encrypt check string
+  const { iv, ct } = await encryptWithKey(key, str2ab('vault-ok'));
+  const meta = { k:'vault', salt: bufToBase64(salt.buffer), check_iv: iv, check_ct: ct, createdAt: Date.now() };
+  await idbPut(META_STORE, meta);
+  return true;
+}
+
+/* ========== File operations ========== */
+function makeId(){ return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,9); }
+
+async function storeFileEncrypted(keyCrypto, file){
+  // read file
+  const ab = await file.arrayBuffer();
+  const { iv, ct } = await encryptWithKey(keyCrypto, ab);
+  const rec = {
+    id: makeId(),
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    iv, ct,            // ciphertext & iv (both base64)
+    storedAt: Date.now()
+  };
+  // note: storing ct as base64 string (not Blob) — it's fine
+  await idbPut(FILE_STORE, rec);
+  return rec;
+}
+
+async function listFiles(){
+  return await idbGetAll(FILE_STORE);
+}
+
+async function deleteFileById(id){
+  await idbDelete(FILE_STORE, id);
+}
+
+async function getFileRecord(id){
+  return await idbGet(FILE_STORE, id);
+}
+
+async function decryptFileToBlob(keyCrypto, fileRec){
+  const plainBuf = await decryptWithKey(keyCrypto, fileRec.iv, fileRec.ct);
+  return new Blob([plainBuf], { type: fileRec.type || 'application/octet-stream' });
+}
+
+/* ========== UI + Unlock flow ========== */
+let currentExpression = '';
+const display = document.getElementById('display');
+const pad = document.getElementById('pad');
+const vault = document.getElementById('vault');
+const filesList = document.getElementById('filesList');
+const fileInput = document.getElementById('fileInput');
+const uploadBtn = document.getElementById('uploadBtn');
+const lockBtn = document.getElementById('lockBtn');
+const changePinBtn = document.getElementById('changePinBtn');
+
+let unlockedKey = null;   // CryptoKey for AES-GCM while unlocked
+let unlockedPin = null;   // string PIN while vault unlocked (in-memory only)
+
+/* Display update */
+function updateDisplay(){ display.textContent = currentExpression || '0'; }
+
+pad.addEventListener('click', e=>{
+  const btn = e.target.closest('button');
+  if(!btn) return;
+  const k = btn.dataset.key;
+  if(k === undefined) return;
+  if(k === 'C'){ currentExpression=''; updateDisplay(); return; }
+  if(k === 'DEL'){ currentExpression = currentExpression.slice(0,-1); updateDisplay(); return; }
+  currentExpression += k;
+  updateDisplay();
+});
+
+document.getElementById('equals').addEventListener('click', async ()=>{
+  const expr = currentExpression.trim();
+  if(!expr) return;
+  // If expression is all digits (we allow 4+ digits) treat as PIN attempt
+  if(/^\d{4,}$/.test(expr)){
+    try {
+      await tryUnlockVault(expr);
+      currentExpression=''; updateDisplay(); return;
+    } catch(e){
+      // fallthrough to try evaluate as math if unlock failed
+      console.log('vault unlock failed', e);
+    }
+  }
+  // Otherwise evaluate as calculator expression (safe limited eval)
+  try {
+    if(!/^[0-9+\-*/().\s]+$/.test(expr)) throw 'Invalid';
+    const result = Function('"use strict"; return ('+expr+')')();
+    currentExpression = String(result);
+  } catch(e){ currentExpression='Error'; }
+  updateDisplay();
+});
+
+/* Try unlock vault with pin:
+   - if vault meta missing: create new vault (first-time) with this PIN and mark unlocked
+   - else: derive key from stored salt and attempt decrypt of check
+*/
+async function tryUnlockVault(pin){
+  const meta = await getMeta();
+  if(!meta){
+    // create new vault
+    await createNewVault(pin);
+    // derive key to store in unlockedKey
+    const newMeta = await getMeta();
+    const saltBuf = new Uint8Array(base64ToBuf(newMeta.salt));
+    unlockedKey = await deriveKeyFromPin(pin, saltBuf);
+    unlockedPin = pin;
+    showVaultUI();
+    await refreshFilesList();
+    alert('Vault created and unlocked.');
+    return true;
+  } else {
+    const saltBuf = new Uint8Array(base64ToBuf(meta.salt));
+    const keyCandidate = await deriveKeyFromPin(pin, saltBuf);
+    try {
+      // try decrypt check
+      const plain = await decryptWithKey(keyCandidate, meta.check_iv, meta.check_ct);
+      const txt = ab2str(plain);
+      if(txt === 'vault-ok'){
+        unlockedKey = keyCandidate;
+        unlockedPin = pin;
+        showVaultUI();
+        await refreshFilesList();
+        return true;
+      } else throw 'bad-check';
+    } catch(err){
+      throw new Error('Invalid PIN');
+    }
+  }
+}
+
+function showVaultUI(){
+  vault.style.display = 'block';
+}
+
+function hideVaultUI(){
+  vault.style.display = 'none';
+}
+
+/* Refresh files list in UI */
+async function refreshFilesList(){
+  const files = await listFiles();
+  if(!files || files.length === 0){
+    filesList.innerHTML = 'No files yet.';
+    return;
+  }
+  filesList.innerHTML = '';
+  // sort by storedAt desc
+  files.sort((a,b)=>b.storedAt - a.storedAt);
+  for(const f of files){
+    const el = document.createElement('div');
+    el.className = 'file-item';
+    const left = document.createElement('div');
+    left.innerHTML = `<div style="font-weight:600">${escapeHtml(f.name)}</div><div class="meta">${formatBytes(f.size)} • ${new Date(f.storedAt).toLocaleString()}</div>`;
+    const right = document.createElement('div');
+    right.style.display='flex';
+    right.style.gap='6px';
+    const dl = document.createElement('button'); dl.textContent='Download'; dl.className='small-btn';
+    const del = document.createElement('button'); del.textContent='Delete'; del.className='small-btn danger';
+    dl.addEventListener('click', async ()=>{
+      try{
+        dl.disabled = true;
+        dl.textContent = 'Decrypting...';
+        const blob = await decryptFileToBlob(unlockedKey, f);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = f.name || 'file';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch(e){
+        alert('Decryption failed: ' + e);
+      } finally { dl.disabled = false; dl.textContent='Download'; }
+    });
+    del.addEventListener('click', async ()=>{
+      if(!confirm('Delete '+f.name+' ?')) return;
+      await deleteFileById(f.id);
+      await refreshFilesList();
+    });
+    right.appendChild(dl); right.appendChild(del);
+    el.appendChild(left); el.appendChild(right);
+    filesList.appendChild(el);
+  }
+}
+
+/* Upload button handler */
+uploadBtn.addEventListener('click', async ()=>{
+  if(!unlockedKey){ alert('Vault locked. Enter PIN then press "=" to unlock.'); return; }
+  const files = fileInput.files;
+  if(!files || files.length===0){ alert('Select files first.'); return; }
+  uploadBtn.disabled = true;
+  uploadBtn.textContent = 'Encrypting...';
+  try{
+    for(const f of files){
+      await storeFileEncrypted(unlockedKey, f);
+    }
+    fileInput.value = '';
+    await refreshFilesList();
+  } catch(e){
+    alert('Upload failed: ' + e);
+  } finally {
+    uploadBtn.disabled = false;
+    uploadBtn.textContent = 'Encrypt & Store';
+  }
+});
+
+/* Lock vault */
+lockBtn.addEventListener('click', ()=>{
+  if(confirm('Lock vault now?')){
+    unlockedKey = null;
+    unlockedPin = null;
+    hideVaultUI();
+    filesList.innerHTML = 'No files yet.';
+    alert('Vault locked.');
+  }
+});
+
+/* Change PIN flow: requires current unlockedPin present */
+changePinBtn.addEventListener('click', async ()=>{
+  if(!unlockedKey || !unlockedPin){ alert('Vault must be unlocked to change PIN.'); return; }
+  const newPin = prompt('Enter NEW numeric PIN (min 4 digits):');
+  if(!newPin) return;
+  if(!/^\d{4,}$/.test(newPin)){ alert('Invalid PIN. Must be 4+ digits.'); return; }
+  if(!confirm('Change PIN to '+newPin+' ? All stored files will remain encrypted (re-keying check).')) return;
+  try{
+    // Create new salt and re-encrypt check string with new key
+    const meta = await getMeta();
+    if(!meta) throw 'No vault meta found';
+    // derive current key again (we already have unlockedKey, but use unlockedPin to get salt)
+    const newSalt = randBytes(16);
+    const newKey = await deriveKeyFromPin(newPin, newSalt);
+    const { iv, ct } = await encryptWithKey(newKey, str2ab('vault-ok'));
+    const newMeta = { k:'vault', salt: bufToBase64(newSalt.buffer), check_iv: iv, check_ct: ct, createdAt: meta.createdAt || Date.now() };
+    await idbPut(META_STORE, newMeta);
+    // update in-memory unlockedKey/pin
+    unlockedKey = newKey;
+    unlockedPin = newPin;
+    alert('PIN changed successfully.');
+  } catch(e){
+    alert('Change PIN failed: '+e);
+  }
+});
+
+/* Helper functions */
+function formatBytes(n){
+  if(n < 1024) return n + ' B';
+  if(n < 1024*1024) return (n/1024).toFixed(1)+' KB';
+  if(n < 1024*1024*1024) return (n/1024/1024).toFixed(1)+' MB';
+  return (n/1024/1024/1024).toFixed(1)+' GB';
+}
+function escapeHtml(s){ return (s+'').replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[c]); }
+
+/* On page load, check if vault exists to inform user (optional) */
+(async function init(){
+  const m = await getMeta();
+  if(!m){
+    // no vault yet
+    filesList.innerHTML = '<div style="font-size:13px;color:#333">Vault not present. Enter new PIN (4+ digits) via calculator and press "=" to create & unlock vault.</div>';
+  } else {
+    filesList.innerHTML = '<div style="font-size:13px;color:#333">Vault present. Enter PIN via calculator and press "=" to unlock.</div>';
+  }
+})();
+
+</script>
+</body>
+</html>
